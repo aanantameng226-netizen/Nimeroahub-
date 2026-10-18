@@ -1,0 +1,1102 @@
+-- Nimeroahub : Auto SP ke koordinat saat ambil hewan, auto ambil hewan drop, auto boost x2
+-- Susunan file:
+--   1) Konfigurasi        5) SP (jalan ke koordinat + zona aman)
+--   2) Helper UI          6) Auto SP saat ambil hewan
+--   3) Jendela utama      7) Auto ambil hewan drop
+--   4) Komponen + UI kedua 8) Auto boost x2  9) Loop utama  10) Menu  11) Intro
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
+
+-- ====== KONFIGURASI ======
+local CFG = {
+    Name = "Nimeroahub",
+    Badge = "BETA",
+    Accent = Color3.fromRGB(40, 110, 255),
+    Bg = Color3.fromRGB(14, 14, 24),
+    Card = Color3.fromRGB(28, 28, 44),
+    On = Color3.fromRGB(60, 210, 120),
+}
+local TARGET = Vector3.new(-13.9, 15.0, -334.6) -- bisa diubah lewat kolom X/Y/Z
+local POST_WALKSPEED = 60    -- kecepatan jalan minimal setelah sampai di koordinat (supaya tidak pelan)
+local POST_HOLD = 10         -- lama kecepatan itu dipertahankan setelah sampai (detik)
+local LIFT_HEIGHT = 3       -- tinggi terangkat dari tanah selama auto SP (studs); turun lagi saat sampai
+local GROUND_MARGIN = 0.5   -- jarak ekstra di atas tanah supaya tidak tertanam (studs)
+local STOP_DIST = 2          -- berhenti kalau sudah sedekat ini (studs)
+local SPEED_PER_LEVEL = 5.1  -- angka 10 = sekitar 51 studs/detik (lumayan cepat)
+local speedLevel = 80
+
+-- ====== PARENT ======
+local parent = (gethui and gethui()) or game:GetService("CoreGui")
+pcall(function() parent:FindFirstChild("NimeroahubUI"):Destroy() end)
+local gui = Instance.new("ScreenGui")
+gui.Name = "NimeroahubUI"
+gui.ResetOnSpawn = false
+gui.Parent = parent
+
+-- ====== HELPER ======
+local function round(o, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 8)
+    c.Parent = o
+    return o
+end
+local function stroke(o, col, t)
+    local s = Instance.new("UIStroke")
+    s.Color = col or CFG.Accent
+    s.Thickness = t or 1.5
+    s.Parent = o
+    return s
+end
+local function label(p, text, size, bold)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = Color3.new(1, 1, 1)
+    l.TextSize = size or 12
+    l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+    l.Parent = p
+    return l
+end
+local function button(p, text, size, pos, color)
+    local b = Instance.new("TextButton")
+    b.Size, b.Position = size, pos or UDim2.new()
+    b.BackgroundColor3 = color or CFG.Card
+    b.Text = text
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.TextSize = 12
+    b.Font = Enum.Font.GothamBold
+    b.Parent = p
+    round(b, 8)
+    return b
+end
+
+local function makeDraggable(handle, target, onTap)
+    local dragging, moved, startPos, startInput
+    handle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved = true, false
+            startPos, startInput = target.Position, i.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    if onTap and not moved then onTap() end
+                end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startInput
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end
+    end)
+end
+
+-- ====== WINDOW (kecil, tinggi otomatis) ======
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 250, 0, 0)
+main.AutomaticSize = Enum.AutomaticSize.Y
+main.Position = UDim2.new(0.5, -125, 0, 16)
+main.BackgroundColor3 = CFG.Bg
+main.Active = true
+main.Parent = gui
+round(main, 12)
+stroke(main)
+
+local pad = Instance.new("UIPadding")
+pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 8)
+pad.Parent = main
+local list = Instance.new("UIListLayout")
+list.Padding = UDim.new(0, 6)
+list.SortOrder = Enum.SortOrder.LayoutOrder
+list.Parent = main
+
+local order = 0
+local function nextOrder() order += 1 return order end
+
+-- Header
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 38)
+header.BackgroundTransparency = 1
+header.LayoutOrder = nextOrder()
+header.Parent = main
+makeDraggable(header, main)
+
+local avatar = Instance.new("ImageLabel")
+avatar.Size = UDim2.new(0, 32, 0, 32)
+avatar.Position = UDim2.new(0, 0, 0, 3)
+avatar.BackgroundColor3 = CFG.Card
+avatar.Image = "rbxthumb://type=AvatarHeadShot&id=" .. lp.UserId .. "&w=150&h=150"
+avatar.Parent = header
+round(avatar, 16)
+stroke(avatar, CFG.Accent, 1.5)
+
+local titleRow = Instance.new("Frame")
+titleRow.Size = UDim2.new(1, -96, 0, 18)
+titleRow.Position = UDim2.new(0, 38, 0, 2)
+titleRow.BackgroundTransparency = 1
+titleRow.Parent = header
+local tl = Instance.new("UIListLayout")
+tl.FillDirection = Enum.FillDirection.Horizontal
+tl.VerticalAlignment = Enum.VerticalAlignment.Center
+tl.Padding = UDim.new(0, 5)
+tl.Parent = titleRow
+local title = label(titleRow, CFG.Name, 15, true)
+title.AutomaticSize = Enum.AutomaticSize.X
+title.Size = UDim2.new(0, 0, 1, 0)
+local badge = label(titleRow, CFG.Badge, 9, true)
+badge.Size = UDim2.new(0, 32, 0, 13)
+badge.BackgroundTransparency = 0
+badge.BackgroundColor3 = CFG.Accent
+round(badge, 7)
+
+local info = label(header, "FPS 0 | Ping 0ms", 10)
+info.Position = UDim2.new(0, 38, 0, 21)
+info.Size = UDim2.new(1, -100, 0, 14)
+info.TextColor3 = Color3.fromRGB(150, 150, 190)
+info.TextXAlignment = Enum.TextXAlignment.Left
+
+local minBtn = button(header, "-", UDim2.new(0, 24, 0, 24), UDim2.new(1, -54, 0, 7), CFG.Card)
+local closeBtn = button(header, "X", UDim2.new(0, 24, 0, 24), UDim2.new(1, -24, 0, 7), CFG.Card)
+
+local line = Instance.new("Frame")
+line.Size = UDim2.new(1, 0, 0, 2)
+line.BorderSizePixel = 0
+line.BackgroundColor3 = CFG.Accent
+line.LayoutOrder = nextOrder()
+line.Parent = main
+
+-- ====== AREA SCROLL (isi menu bisa digeser) ======
+local body = Instance.new("ScrollingFrame")
+body.Size = UDim2.new(1, 0, 0, 120)
+body.BackgroundTransparency = 1
+body.BorderSizePixel = 0
+body.ScrollBarThickness = 3
+body.ScrollBarImageColor3 = CFG.Accent
+body.CanvasSize = UDim2.new()
+body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+body.ScrollingDirection = Enum.ScrollingDirection.Y
+body.LayoutOrder = nextOrder()
+body.Parent = main
+local bodyList = Instance.new("UIListLayout")
+bodyList.Padding = UDim.new(0, 6)
+bodyList.SortOrder = Enum.SortOrder.LayoutOrder
+bodyList.Parent = body
+local bodyPad = Instance.new("UIPadding")
+bodyPad.PaddingRight = UDim.new(0, 6)
+bodyPad.Parent = body
+local function fitBody()
+    local cam = workspace.CurrentCamera
+    local maxH = math.clamp((cam and cam.ViewportSize.Y or 400) - 150, 110, 300)
+    body.Size = UDim2.new(1, 0, 0, math.min(bodyList.AbsoluteContentSize.Y, maxH))
+end
+bodyList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(fitBody)
+
+-- ====== STATUS KECIL (pengganti tab notif) ======
+local statusLbl = label(main, "", 10)
+statusLbl.Size = UDim2.new(1, 0, 0, 14)
+statusLbl.AutomaticSize = Enum.AutomaticSize.Y
+statusLbl.TextWrapped = true
+statusLbl.TextColor3 = Color3.fromRGB(150, 150, 190)
+statusLbl.LayoutOrder = 999
+statusLbl.Visible = false
+local statusToken = 0
+local function Notify(text, dur)
+    statusToken += 1
+    local my = statusToken
+    statusLbl.Text = text
+    statusLbl.Visible = true
+    task.delay(dur or 3, function()
+        if my == statusToken then statusLbl.Visible = false end
+    end)
+end
+
+-- ====== GELEMBUNG ON/OFF ======
+local bubble = Instance.new("ImageButton")
+bubble.Size = UDim2.new(0, 42, 0, 42)
+bubble.Position = UDim2.new(0, 12, 0.35, 0)
+bubble.BackgroundColor3 = CFG.Bg
+bubble.Image = "rbxthumb://type=AvatarHeadShot&id=" .. lp.UserId .. "&w=150&h=150"
+bubble.AutoButtonColor = false
+bubble.Parent = gui
+round(bubble, 21)
+local bubbleStroke = stroke(bubble, CFG.Accent, 2.5)
+
+local ownFrames = {main, bubble} -- area UI sendiri (dihindari auto klik)
+local function toggleMenu() main.Visible = not main.Visible end
+makeDraggable(bubble, bubble, toggleMenu)
+minBtn.MouseButton1Click:Connect(function() main.Visible = false end)
+
+-- ====== KOMPONEN ======
+local function AddToggle(text, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 36)
+    row.BackgroundColor3 = CFG.Card
+    row.LayoutOrder = nextOrder()
+    row.Parent = body
+    round(row, 8)
+    local l = label(row, text, 12, true)
+    l.Size = UDim2.new(1, -60, 1, 0)
+    l.Position = UDim2.new(0, 10, 0, 0)
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextWrapped = true
+    local sw = Instance.new("TextButton")
+    sw.Size = UDim2.new(0, 38, 0, 20)
+    sw.Position = UDim2.new(1, -46, 0.5, -10)
+    sw.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+    sw.Text = ""
+    sw.Parent = row
+    round(sw, 10)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = UDim2.new(0, 2, 0.5, -8)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.Parent = sw
+    round(knob, 8)
+    local on = false
+    sw.MouseButton1Click:Connect(function()
+        on = not on
+        sw.BackgroundColor3 = on and CFG.Accent or Color3.fromRGB(70, 70, 90)
+        knob:TweenPosition(on and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8), "Out", "Quad", 0.15, true)
+        task.spawn(callback, on)
+    end)
+end
+
+local function AddButton(text, callback)
+    local b = button(body, text, UDim2.new(1, 0, 0, 30), nil, CFG.Card)
+    b.LayoutOrder = nextOrder()
+    b.MouseButton1Click:Connect(callback)
+end
+
+-- label judul (tanpa tombol)
+local function AddLabel(text)
+    local l = label(body, text, 13, true)
+    l.Size = UDim2.new(1, 0, 0, 22)
+    l.TextColor3 = CFG.Accent
+    l.LayoutOrder = nextOrder()
+    return l
+end
+
+local function AddNumber(text, default, callback, parent)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 36)
+    row.BackgroundColor3 = CFG.Card
+    row.LayoutOrder = nextOrder()
+    row.Parent = parent or body
+    round(row, 8)
+    local l = label(row, text, 12, true)
+    l.Size = UDim2.new(1, -90, 1, 0)
+    l.Position = UDim2.new(0, 10, 0, 0)
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    local tb = Instance.new("TextBox")
+    tb.Size = UDim2.new(0, 70, 0, 24)
+    tb.Position = UDim2.new(1, -78, 0.5, -12)
+    tb.BackgroundColor3 = CFG.Bg
+    tb.TextColor3 = Color3.new(1, 1, 1)
+    tb.Text = tostring(default)
+    tb.TextSize = 12
+    tb.Font = Enum.Font.GothamBold
+    tb.ClearTextOnFocus = false
+    tb.Parent = row
+    round(tb, 6)
+    local cur = default
+    tb.FocusLost:Connect(function()
+        local n = tonumber(tb.Text)
+        if n then
+            cur = n -- tanpa batas minimal / maksimal
+            callback(cur)
+        end
+        tb.Text = tostring(cur)
+    end)
+end
+
+-- ====== UI KEDUA (panel yang muncul saat fitur ditekan) ======
+local PANEL_W = 210
+local panels = {}
+
+-- panel ditaruh di samping jendela utama (kanan, atau kiri kalau tidak muat, atau di bawah)
+local function placePanel(p)
+    local cam = workspace.CurrentCamera
+    local vs = cam and cam.ViewportSize or Vector2.new(800, 400)
+    local mx, mw = main.AbsolutePosition.X, main.AbsoluteSize.X
+    local mp = main.Position
+    if mx + mw + 6 + PANEL_W <= vs.X then
+        p.Position = UDim2.new(mp.X.Scale, mp.X.Offset + mw + 6, mp.Y.Scale, mp.Y.Offset)
+    elseif mx - 6 - PANEL_W >= 0 then
+        p.Position = UDim2.new(mp.X.Scale, mp.X.Offset - PANEL_W - 6, mp.Y.Scale, mp.Y.Offset)
+    else
+        p.Position = UDim2.new(mp.X.Scale, mp.X.Offset, mp.Y.Scale, mp.Y.Offset + main.AbsoluteSize.Y + 6)
+    end
+end
+
+-- kartu fitur di menu utama; kalau ditekan muncul UI kedua berisi pengaturannya.
+-- build(content) mengisi UI kedua. Mengembalikan fungsi refresh judul kartu.
+local function AddPanelButton(titleFn, panelTitle, build)
+    local btn = button(body, "", UDim2.new(1, 0, 0, 36), nil, CFG.Card)
+    btn.LayoutOrder = nextOrder()
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    local bpad = Instance.new("UIPadding")
+    bpad.PaddingLeft, bpad.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
+    bpad.Parent = btn
+
+    local panel = Instance.new("Frame")
+    panel.Size = UDim2.new(0, PANEL_W, 0, 0)
+    panel.AutomaticSize = Enum.AutomaticSize.Y
+    panel.BackgroundColor3 = CFG.Bg
+    panel.Active = true
+    panel.Visible = false
+    panel.Parent = gui
+    round(panel, 12)
+    stroke(panel)
+    ownFrames[#ownFrames + 1] = panel
+    local ppad = Instance.new("UIPadding")
+    ppad.PaddingTop, ppad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+    ppad.PaddingLeft, ppad.PaddingRight = UDim.new(0, 8), UDim.new(0, 8)
+    ppad.Parent = panel
+    local plist = Instance.new("UIListLayout")
+    plist.Padding = UDim.new(0, 6)
+    plist.SortOrder = Enum.SortOrder.LayoutOrder
+    plist.Parent = panel
+
+    local ph = Instance.new("Frame")
+    ph.Size = UDim2.new(1, 0, 0, 24)
+    ph.BackgroundTransparency = 1
+    ph.LayoutOrder = 1
+    ph.Parent = panel
+    local pt = label(ph, panelTitle, 13, true)
+    pt.Size = UDim2.new(1, -30, 1, 0)
+    pt.TextXAlignment = Enum.TextXAlignment.Left
+    local px = button(ph, "X", UDim2.new(0, 24, 0, 24), UDim2.new(1, -24, 0, 0), CFG.Card)
+
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, 0, 0, 0)
+    content.AutomaticSize = Enum.AutomaticSize.Y
+    content.BackgroundTransparency = 1
+    content.LayoutOrder = 2
+    content.Parent = panel
+    local clist = Instance.new("UIListLayout")
+    clist.Padding = UDim.new(0, 6)
+    clist.SortOrder = Enum.SortOrder.LayoutOrder
+    clist.Parent = content
+    build(content)
+
+    local entry = {}
+    local function refresh()
+        btn.Text = titleFn() .. (panel.Visible and "   <" or "   >")
+        btn.BackgroundColor3 = panel.Visible and CFG.Accent or CFG.Card
+    end
+    function entry.set(open)
+        panel.Visible = open
+        if open then placePanel(panel) end
+        refresh()
+    end
+    panels[#panels + 1] = entry
+    btn.MouseButton1Click:Connect(function()
+        for _, e in ipairs(panels) do
+            if e ~= entry then e.set(false) end
+        end
+        entry.set(not panel.Visible)
+    end)
+    px.MouseButton1Click:Connect(function() entry.set(false) end)
+    local function follow() if panel.Visible then placePanel(panel) end end
+    main:GetPropertyChangedSignal("Position"):Connect(follow)
+    main:GetPropertyChangedSignal("AbsoluteSize"):Connect(follow)
+    main:GetPropertyChangedSignal("Visible"):Connect(function()
+        if not main.Visible then entry.set(false) end
+    end)
+    refresh()
+    return refresh
+end
+
+-- ====== SP (JALAN KE KOORDINAT) ======
+local spConn = nil
+local carried = nil -- hewan (Tool) yang sedang dibawa
+local picked = nil  -- info hewan dunia yang baru diambil
+local extraDropCheck = nil -- diisi di bagian auto ambil drop
+local function spSpeed() return math.max(speedLevel, 0.01) * SPEED_PER_LEVEL end
+
+local autoOn = false -- toggle "Auto SP saat ambil hewan"
+local holdConn, holdInfo, walkBase = nil, nil, nil
+local function cancelHold()
+    if holdConn then holdConn:Disconnect() holdConn = nil end
+    if holdInfo then
+        local h = holdInfo.hum
+        if h.Parent and h.WalkSpeed == holdInfo.fast then h.WalkSpeed = holdInfo.base end
+        holdInfo = nil
+    end
+end
+
+local function stopSP(reason)
+    cancelHold()
+    if spConn then spConn:Disconnect() spConn = nil end
+    carried = nil
+    picked = nil
+    local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    if root then root.AssemblyLinearVelocity = Vector3.zero end
+    if reason then Notify(reason) end
+end
+
+local function carriedGone()
+    if not carried then return false end
+    if carried.Parent == nil then return true end
+    if carried:IsA("Tool") then
+        local bp = lp:FindFirstChild("Backpack")
+        local inChar = lp.Character and carried:IsDescendantOf(lp.Character)
+        local inBp = bp and carried:IsDescendantOf(bp)
+        return not (inChar or inBp)
+    end
+    return false
+end
+
+-- pertahankan kecepatan jalan setelah sampai (tidak kembali pelan)
+local function holdSpeed(hum, base)
+    cancelHold()
+    local untilT = tick() + POST_HOLD
+    local fast = math.max(base, POST_WALKSPEED)
+    holdInfo = {hum = hum, base = base, fast = fast}
+    holdConn = RunService.Heartbeat:Connect(function()
+        if tick() > untilT or not hum.Parent or hum.Health <= 0 then
+            return cancelHold()
+        end
+        hum.WalkSpeed = fast
+    end)
+end
+
+-- tinggi tanah (Y) di titik x,z: tembak sinar ke bawah, lewati part yang tidak padat
+local function groundY(x, fromY, z, ignore)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local list = table.clone(ignore)
+    for _ = 1, 6 do
+        params.FilterDescendantsInstances = list
+        local hit = workspace:Raycast(Vector3.new(x, fromY, z), Vector3.new(0, -400, 0), params)
+        if not hit then return nil end
+        if hit.Instance.CanCollide then return hit.Position.Y end
+        list[#list + 1] = hit.Instance
+    end
+    return nil
+end
+
+local function startSP()
+    stopSP()
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root then Notify("Karakter belum siap") return false end
+    local baseY = math.min(root.Position.Y, TARGET.Y)
+    if hum then walkBase = hum.WalkSpeed end -- kecepatan asli sebelum SP
+    local lastPos = root.Position
+    -- abaikan karakter sendiri & pemain lain saat mencari tanah
+    local ignore = {char}
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= lp and pl.Character then ignore[#ignore + 1] = pl.Character end
+    end
+    local stand = ((hum and hum.RigType == Enum.HumanoidRigType.R6) and 3
+        or ((hum and hum.HipHeight or 2) + root.Size.Y / 2)) + GROUND_MARGIN
+    spConn = RunService.Heartbeat:Connect(function(dt)
+        local r = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if not r or lp.Character ~= char then return stopSP("SP batal: karakter berganti") end
+        if not autoOn then return stopSP("SP dihentikan (Auto SP OFF)") end
+
+        -- batal kalau terjatuh / terpental / mati / hewan jatuh
+        if hum then
+            local st = hum:GetState()
+            if hum.Health <= 0 or st == Enum.HumanoidStateType.Dead
+                or st == Enum.HumanoidStateType.FallingDown
+                or st == Enum.HumanoidStateType.Ragdoll then
+                return stopSP("SP batal: terjatuh")
+            end
+        end
+        if r.Position.Y < baseY - 25 then return stopSP("SP batal: terjatuh") end
+        if (r.Position - lastPos).Magnitude > 12 then return stopSP("SP batal: posisi berubah") end
+        if carriedGone() then return stopSP("SP batal: hewan jatuh, ambil lagi") end
+        if extraDropCheck and extraDropCheck() then return stopSP("SP batal: hewan jatuh, ambil lagi") end
+
+        local diff = TARGET - r.Position
+        local flatDist = Vector3.new(diff.X, 0, diff.Z).Magnitude
+
+        -- sampai: taruh tepat di atas tanah (tidak tembus ke bawah tanah / objek)
+        if flatDist <= STOP_DIST then
+            local gy = groundY(TARGET.X, math.max(TARGET.Y, r.Position.Y) + 5, TARGET.Z, ignore)
+            local finalY = gy and (gy + stand) or TARGET.Y
+            r.CFrame = CFrame.new(Vector3.new(TARGET.X, finalY, TARGET.Z)) * (r.CFrame - r.CFrame.Position)
+            stopSP("Sampai di tujuan")
+            if hum then holdSpeed(hum, walkBase or hum.WalkSpeed) end
+            return
+        end
+
+        local step = math.min(spSpeed() * dt, diff.Magnitude)
+        local newPos = r.Position + diff.Unit * step
+        -- selama perjalanan karakter diangkat sedikit dari tanah (dan tidak masuk ke bawah tanah)
+        local gy = groundY(newPos.X, math.max(newPos.Y, r.Position.Y) + 5, newPos.Z, ignore)
+        if gy and newPos.Y < gy + stand + LIFT_HEIGHT then
+            newPos = Vector3.new(newPos.X, gy + stand + LIFT_HEIGHT, newPos.Z)
+        end
+        r.AssemblyLinearVelocity = Vector3.zero
+        r.CFrame = CFrame.new(newPos, newPos + Vector3.new(diff.X, 0, diff.Z))
+        lastPos = newPos
+    end)
+    return true
+end
+
+-- ====== AUTO SP SAAT AMBIL HEWAN (1 toggle, semua pendeteksi aktif) ======
+local lastTrigger = 0
+local loadedAt = tick()
+local spawnedAt = tick()
+local lastItemAdded, lastItem = 0, nil
+local lastPromptAt = 0 -- terakhir kali kamu menekan tombol ambil
+local petPromptCheck = nil -- diisi di bagian auto ambil drop
+local function recentPick() return tick() - lastPromptAt < 5 end
+
+local function trigger(reason, inst)
+    if not autoOn then return end
+    if spConn or tick() - lastTrigger < 1.5 then return end
+    lastTrigger = tick()
+    Notify("Ambil hewan: " .. reason)
+    if startSP() then carried = inst end
+end
+
+-- 1) Item baru di Backpack / Character
+local seen = setmetatable({}, {__mode = "k"})
+local function onNewItem(item)
+    if not (item:IsA("Tool") or item:IsA("Model")) then return end
+    local isNew = not seen[item]
+    seen[item] = true
+    if isNew then lastItemAdded, lastItem = tick(), item end
+    if isNew and tick() - spawnedAt > 3 and recentPick() then trigger(item.Name, item) end
+end
+local function watch(container)
+    for _, it in ipairs(container:GetChildren()) do seen[it] = true end
+    container.ChildAdded:Connect(onNewItem)
+    container.ChildRemoved:Connect(function(item)
+        task.delay(0.2, function()
+            local bp = lp:FindFirstChild("Backpack")
+            local stillMine = (bp and item:IsDescendantOf(bp)) or (lp.Character and item:IsDescendantOf(lp.Character))
+            if not stillMine then seen[item] = nil end -- lepas dari kita: kalau diambil lagi dianggap baru
+        end)
+    end)
+end
+task.spawn(function() watch(lp:WaitForChild("Backpack")) end)
+if lp.Character then watch(lp.Character) end
+lp.CharacterAdded:Connect(function(char)
+    spawnedAt = tick()
+    watch(char)
+    task.spawn(function() watch(lp:WaitForChild("Backpack")) end)
+end)
+
+-- 2) Data baru di dalam Player (folder / value hewan)
+lp.DescendantAdded:Connect(function(inst)
+    if tick() - loadedAt < 5 or not recentPick() then return end
+    if inst:FindFirstAncestorOfClass("PlayerGui") or inst:FindFirstAncestorOfClass("Backpack")
+        or inst:FindFirstChildOfClass("Humanoid") then return end
+    if lp.Character and inst:IsDescendantOf(lp.Character) then return end
+    if inst:IsA("ValueBase") or inst:IsA("Folder") or inst:IsA("Model") or inst:IsA("Configuration") then
+        trigger(inst.Name, inst)
+    end
+end)
+
+-- 3) Model baru di Workspace milik kamu
+local function isMine(model)
+    for _, v in pairs(model:GetAttributes()) do
+        if v == lp.UserId or v == lp.Name or v == lp.DisplayName then return true end
+    end
+    for _, c in ipairs(model:GetChildren()) do
+        if c:IsA("ObjectValue") and c.Value == lp then return true end
+        if c:IsA("StringValue") and (c.Value == lp.Name or c.Value == lp.DisplayName) then return true end
+        if c:IsA("IntValue") and c.Value == lp.UserId then return true end
+    end
+    return false
+end
+workspace.DescendantAdded:Connect(function(inst)
+    if tick() - loadedAt < 5 or not inst:IsA("Model") then return end
+    task.delay(0.15, function()
+        if inst.Parent and recentPick() and isMine(inst) then trigger(inst.Name, inst) end
+    end)
+end)
+
+-- 4) Tekan tombol ambil (ProximityPrompt)
+pcall(function()
+    game:GetService("ProximityPromptService").PromptTriggered:Connect(function(prompt, plr)
+        if plr ~= lp then return end
+        lastPromptAt = tick()
+        -- hanya tombol ambil hewan di dunia yang memicu SP (bukan hewan yang sedang dipegang)
+        if petPromptCheck and petPromptCheck(prompt) then
+            trigger(prompt.ActionText ~= "" and prompt.ActionText or prompt.Name)
+        end
+    end)
+end)
+
+-- ====== AUTO AMBIL HEWAN DROP (minimal B / T per detik) ======
+-- Cari ProximityPrompt (tombol ambil) pada hewan yang punya teks "$37.1M/s".
+-- Hanya hewan >= minimal (bawaan 1B/s) yang diambil, sisanya dilewati.
+-- Timer di atas hewan (misal "21.1s") dipakai supaya tidak mengejar hewan yang keburu hilang.
+local MULT = {k=1e3, m=1e6, b=1e9, t=1e12, qa=1e15, qi=1e18, sx=1e21, sp=1e24, oc=1e27, no=1e30, dc=1e33}
+local SUFS = {{1e33,"Dc"},{1e30,"No"},{1e27,"Oc"},{1e24,"Sp"},{1e21,"Sx"},{1e18,"Qi"},{1e15,"Qa"},{1e12,"T"},{1e9,"B"},{1e6,"M"},{1e3,"K"}}
+
+local function clean(text)
+    local t = text:gsub("<[^>]+>", "")
+    t = t:gsub(",", "")
+    return t
+end
+
+local function parseIncome(text)
+    if type(text) ~= "string" then return nil end
+    local t = clean(text)
+    local num, suf = t:match("%$?%s*([%d%.]+)%s*(%a*)%s*/%s*[sS]")
+    local n = tonumber(num)
+    if not n then return nil end
+    local m = (suf == "") and 1 or MULT[suf:lower()]
+    if not m then return nil end
+    return n * m
+end
+
+local function parseTimer(text)
+    if type(text) ~= "string" then return nil end
+    return tonumber(clean(text):match("^%s*(%d+%.?%d*)%s*[sS]%s*$"))
+end
+
+local function fmtIncome(v)
+    for _, e in ipairs(SUFS) do
+        if v >= e[1] then return ("%.1f%s"):format(v / e[1], e[2]) end
+    end
+    return tostring(math.floor(v))
+end
+
+-- daftar prompt di Workspace
+local prompts, blacklist = {}, {}
+local clicks = {}
+local function trackPrompt(d)
+    if d:IsA("ProximityPrompt") then prompts[d] = true
+    elseif d:IsA("ClickDetector") then clicks[d] = true end
+end
+workspace.DescendantAdded:Connect(trackPrompt)
+workspace.DescendantRemoving:Connect(function(d) prompts[d] = nil clicks[d] = nil end)
+task.spawn(function()
+    for i, d in ipairs(workspace:GetDescendants()) do
+        trackPrompt(d)
+        if i % 3000 == 0 then task.wait() end
+    end
+end)
+
+local function promptPart(prompt)
+    local p = prompt.Parent
+    if not p then return nil end
+    if p:IsA("BasePart") then return p end
+    if p:IsA("Attachment") and p.Parent and p.Parent:IsA("BasePart") then return p.Parent end
+    local m = p:IsA("Model") and p or p:FindFirstAncestorOfClass("Model")
+    return m and (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true))
+end
+
+-- cari label pendapatan & timer milik hewan (di-cache supaya ringan)
+local infoCache = setmetatable({}, {__mode = "k"})
+local function findLabels(prompt)
+    local incL, timL
+    local root = prompt.Parent
+    for _ = 1, 3 do
+        if not root or root == workspace or root:IsA("Folder") then break end
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                if not incL and parseIncome(d.Text) then incL = d end
+                if not timL and parseTimer(d.Text) then timL = d end
+            end
+        end
+        if incL then break end
+        root = root.Parent
+    end
+    return incL, timL
+end
+
+local function getInfo(prompt)
+    local e = infoCache[prompt]
+    local age = e and (tick() - e.t) or 0
+    if not e or (e.inc and not e.inc.Parent) or (not e.inc and age > 1.5) or (e.inc and not e.tim and age > 2) then
+        local i, t = findLabels(prompt)
+        e = {inc = i, tim = t, t = tick()}
+        infoCache[prompt] = e
+    end
+    if not e.inc then return nil end
+    local income = parseIncome(e.inc.Text)
+    local timer = (e.tim and e.tim.Parent) and parseTimer(e.tim.Text) or nil
+    return income, timer
+end
+
+petPromptCheck = function(prompt)
+    local model = prompt:FindFirstAncestorOfClass("Model")
+    if model and (model == lp.Character or isMine(model)) then return false end
+    local inc = getInfo(prompt)
+    return inc ~= nil
+end
+
+local function petName(c)
+    if c.prompt.ObjectText ~= "" then return c.prompt.ObjectText end
+    return c.model and c.model.Name or c.prompt.Name
+end
+
+local autoDropOn, busy = false, false
+local minIncome, radius = 1e9, 300 -- minimal 1B/s (B atau T); radius tetap
+local pickSpeed = 150 -- kecepatan ambil: sangat cepat (tetap, tidak ada di menu)
+local function pickSpeedVal() return math.max(pickSpeed, 0.01) * SPEED_PER_LEVEL end
+
+local function scan(minV, maxDist, checkTimer)
+    local r = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    local out = {}
+    if not r then return out end
+    for prompt in pairs(prompts) do
+        local bl = blacklist[prompt]
+        if prompt.Parent and prompt.Enabled and not (bl and bl > tick()) then
+            local part = promptPart(prompt)
+            if part then
+                local d = (part.Position - r.Position).Magnitude
+                if d <= maxDist then
+                    local model = prompt:FindFirstAncestorOfClass("Model")
+                    if not (model and (model == lp.Character or isMine(model))) then
+                        local inc, timer = getInfo(prompt)
+                        if inc and inc >= minV then
+                            -- lewati kalau hewan keburu hilang sebelum sampai
+                            local reachable = not (checkTimer and timer and timer < d / pickSpeedVal() + 1)
+                            if reachable then
+                                out[#out + 1] = {prompt = prompt, part = part, dist = d, income = inc, timer = timer, model = model}
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- paling mahal dulu (T sebelum B), lalu yang terdekat
+    table.sort(out, function(a, b)
+        if a.income ~= b.income then return a.income > b.income end
+        return a.dist < b.dist
+    end)
+    return out
+end
+
+-- jalan cepat (blocking) ke posisi yang terus diperbarui
+local function walkTo(getPos, stop, abortFn, timeout)
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root then return false end
+    local lastPos, t0 = root.Position, tick()
+    while true do
+        local dt = RunService.Heartbeat:Wait()
+        local r = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if not autoDropOn or not r or lp.Character ~= char then return false end
+        if hum and hum.Health <= 0 then return false end
+        if (r.Position - lastPos).Magnitude > 40 then return false end -- terpental / dipindah game
+        if tick() - t0 > (timeout or 20) then return false end
+        if abortFn and abortFn() then return false end
+        local diff = getPos() - r.Position
+        local dist = diff.Magnitude
+        if dist <= stop then return true end
+        local newPos = r.Position + diff.Unit * math.min(pickSpeedVal() * dt, dist)
+        r.AssemblyLinearVelocity = Vector3.zero
+        r.CFrame = CFrame.new(newPos, newPos + Vector3.new(diff.X, 0, diff.Z))
+        lastPos = newPos
+    end
+end
+
+local function pickup(c)
+    local prompt, part, model = c.prompt, c.part, c.model
+    Notify(("Kejar %s %s/s"):format(petName(c), fmtIncome(c.income)))
+    local arrived = walkTo(function() return part.Position + Vector3.new(0, 3, 0) end, 3,
+        function() return not prompt.Parent or not prompt.Enabled end, 20)
+    if not arrived then
+        blacklist[prompt] = tick() + 2
+        return
+    end
+
+    -- tekan tombol ambil terus tiap frame (tanpa jeda) sampai hewan terambil
+    for _ = 1, 10 do
+        if fireproximityprompt then
+            pcall(fireproximityprompt, prompt)
+        else
+            pcall(function()
+                prompt:InputHoldBegin()
+                task.wait(math.max(prompt.HoldDuration, 0) + 0.1)
+                prompt:InputHoldEnd()
+            end)
+        end
+        RunService.Heartbeat:Wait()
+        if not prompt.Parent or not prompt.Enabled then break end
+    end
+
+    -- cek berhasil diambil
+    local ok, mode, t = false, nil, tick()
+    while tick() - t < 2.5 do
+        RunService.Heartbeat:Wait()
+        if tick() - lastItemAdded < 3 then ok, mode = true, "tool" break end
+        if not prompt.Parent or not prompt.Enabled or (model and not model.Parent) then
+            ok, mode = true, "world"
+            break
+        end
+    end
+
+    if ok then
+        if autoOn and not spConn and startSP() then
+            if mode == "tool" then
+                carried = lastItem -- jatuh = item hilang dari tas / tangan
+            else
+                picked = {
+                    prompt = prompt, name = petName(c), income = c.income, t = tick(),
+                    model = (model and model.Parent) and model or nil,
+                    expectDisabled = (prompt.Parent ~= nil and not prompt.Enabled),
+                }
+            end
+        end
+    else
+        blacklist[prompt] = tick() + 3
+        Notify("Gagal ambil, cari yang lain")
+    end
+end
+
+-- deteksi hewan jatuh untuk hewan "dunia" (bukan Tool)
+local lastDropScan = 0
+extraDropCheck = function()
+    if not picked or tick() - picked.t < 1 then return false end
+    if picked.model and not picked.model.Parent then return true end
+    if tick() - lastDropScan > 0.25 then
+        lastDropScan = tick()
+        for _, c in ipairs(scan(0, 60)) do
+            local sameName = petName(c) == picked.name
+            local sameIncome = math.abs(c.income - picked.income) <= picked.income * 0.02
+            if sameName and sameIncome and (c.prompt ~= picked.prompt or picked.expectDisabled) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- ====== AUTO BOOST X2 ======
+-- Menembak remote rev_TreadmillBoost berulang-ulang (sama seperti menekan boost x2).
+local BOOST_ID = 183      -- argumen boost
+local BOOST_DELAY = 0.3   -- jeda antar tembakan (detik)
+local autoBoostOn = false
+local boostRemote, lastBoostWarn = nil, 0
+
+local function getBoostRemote()
+    if boostRemote and boostRemote.Parent then return boostRemote end
+    local ok, r = pcall(function()
+        return game:GetService("ReplicatedStorage")
+            :WaitForChild("Modules", 3):WaitForChild("Shared", 3)
+            :WaitForChild("Packages", 3):WaitForChild("Network", 3)
+            :WaitForChild("rev_TreadmillBoost", 3)
+    end)
+    boostRemote = ok and r or nil
+    return boostRemote
+end
+
+task.spawn(function()
+    while gui.Parent do
+        if autoBoostOn then
+            local r = getBoostRemote()
+            if r then
+                pcall(function() r:FireServer(BOOST_ID) end)
+            elseif tick() - lastBoostWarn > 5 then
+                lastBoostWarn = tick()
+                Notify("Remote boost tidak ketemu")
+            end
+            task.wait(BOOST_DELAY)
+        else
+            task.wait(0.3)
+        end
+    end
+end)
+
+-- ====== LOOP UTAMA ======
+task.spawn(function()
+    while gui.Parent do
+        task.wait(0.03)
+        if not busy and not spConn then
+            if autoDropOn then
+                local list = scan(minIncome, radius, true)
+                if list[1] then
+                    busy = true
+                    pcall(pickup, list[1])
+                    busy = false
+                end
+            end
+        end
+    end
+end)
+
+-- ====== MENU ======
+AddLabel("RODEO UNTUK HEWAN")
+
+-- Kecepatan SP
+AddNumber("Kecepatan SP", speedLevel, function(v)
+    speedLevel = v
+    Notify("Kecepatan SP: " .. v)
+end)
+
+-- Auto SP
+AddToggle("Auto SP saat ambil hewan", function(state)
+    autoOn = state
+    bubbleStroke.Color = state and CFG.On or CFG.Accent -- gelembung hijau = aktif
+    if not state then stopSP() end
+    Notify("Auto SP " .. (state and "ON" or "OFF"))
+end)
+
+-- Min penghasilan (UI kedua): isi angka sendiri + pilih satuan K / M / B / T
+local minValue, minUnit = 1, 1e9 -- bawaan 1B/s
+local refreshMin
+local function applyMin()
+    minIncome = minValue * minUnit
+    refreshMin()
+    Notify("Minimal: " .. fmtIncome(minIncome) .. "/s")
+end
+refreshMin = AddPanelButton(function()
+    return "Min penghasilan: " .. fmtIncome(minIncome) .. "/s"
+end, "Min penghasilan", function(panel)
+    AddNumber("Jumlah", minValue, function(v)
+        minValue = v
+        applyMin()
+    end, panel)
+
+    local UNITS = {{"K", 1e3}, {"M", 1e6}, {"B", 1e9}, {"T", 1e12}}
+    local unitRow = Instance.new("Frame")
+    unitRow.Size = UDim2.new(1, 0, 0, 30)
+    unitRow.BackgroundTransparency = 1
+    unitRow.LayoutOrder = nextOrder()
+    unitRow.Parent = panel
+    local unitBtns = {}
+    local function paintUnits()
+        for i, u in ipairs(UNITS) do
+            unitBtns[i].BackgroundColor3 = (minUnit == u[2]) and CFG.Accent or CFG.Card
+        end
+    end
+    for i, u in ipairs(UNITS) do
+        local b = button(unitRow, u[1], UDim2.new(0.25, -4, 0, 28),
+            UDim2.new((i - 1) / 4, 2, 0.5, -14), CFG.Card)
+        unitBtns[i] = b
+        b.MouseButton1Click:Connect(function()
+            minUnit = u[2]
+            paintUnits()
+            applyMin()
+        end)
+    end
+    paintUnits()
+end)
+
+-- Auto ambil hewan drop
+AddToggle("Auto ambil hewan drop", function(state)
+    autoDropOn = state
+    bubbleStroke.Color = (state or autoOn) and CFG.On or CFG.Accent
+    Notify("Auto ambil drop " .. (state and "ON" or "OFF"))
+end)
+
+-- Auto boost x2
+AddToggle("Auto klik boost x2", function(state)
+    autoBoostOn = state
+    Notify("Auto boost x2 " .. (state and "ON" or "OFF"))
+end)
+
+-- ====== FPS & PING ======
+local frames, t0 = 0, tick()
+local fpsConn = RunService.RenderStepped:Connect(function() frames += 1 end)
+task.spawn(function()
+    while gui.Parent do
+        task.wait(1)
+        local fps = math.floor(frames / (tick() - t0))
+        frames, t0 = 0, tick()
+        local ping = 0
+        pcall(function() ping = math.floor(lp:GetNetworkPing() * 1000) end)
+        info.Text = ("FPS %d | Ping %dms"):format(fps, ping)
+    end
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+    autoOn = false
+    stopSP()
+    fpsConn:Disconnect()
+    gui:Destroy()
+end)
+
+-- ====== INTRO (tampil sebentar saat script dijalankan) ======
+-- Gelembung tetap tampil; hanya menu utama yang disembunyikan selama intro.
+task.spawn(function()
+    local TweenService = game:GetService("TweenService")
+    local mainWas = main.Visible
+    main.Visible = false
+
+    local box = Instance.new("Frame")
+    box.AnchorPoint = Vector2.new(0.5, 0.5)
+    box.Position = UDim2.new(0.5, 0, 0.5, 0)
+    box.Size = UDim2.new(0, 300, 0, 140)
+    box.BackgroundColor3 = CFG.Bg
+    box.ZIndex = 100
+    box.Parent = gui
+    round(box, 14)
+    local boxStroke = stroke(box, CFG.Accent, 2)
+    local scale = Instance.new("UIScale")
+    scale.Scale = 0.7
+    scale.Parent = box
+
+    -- teks langsung terlihat jelas (di atas kotak, dengan garis tepi)
+    local function introLabel(text, size, bold, y, h, color)
+        local l = label(box, text, size, bold)
+        l.Size = UDim2.new(1, 0, 0, h)
+        l.Position = UDim2.new(0, 0, 0, y)
+        l.TextColor3 = color or Color3.new(1, 1, 1)
+        l.TextStrokeTransparency = 0.6
+        l.TextTransparency = 1 -- dimunculkan pelan lewat tween
+        l.ZIndex = 101
+        return l
+    end
+    local title = introLabel(CFG.Name, 30, true, 16, 38)
+    local sub = introLabel("RODEO UNTUK HEWAN", 14, true, 58, 20, CFG.Accent)
+    local status = introLabel("Memuat...", 12, false, 84, 16, Color3.fromRGB(190, 190, 210))
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0, 240, 0, 8)
+    track.Position = UDim2.new(0.5, -120, 0, 112)
+    track.BackgroundColor3 = CFG.Card
+    track.ZIndex = 101
+    track.Parent = box
+    round(track, 4)
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = CFG.Accent
+    fill.ZIndex = 102
+    fill.Parent = track
+    round(fill, 4)
+
+    local function tween(o, t, props, style, dir)
+        local tw = TweenService:Create(o, TweenInfo.new(t, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props)
+        tw:Play()
+        return tw
+    end
+
+    -- muncul
+    tween(scale, 0.5, {Scale = 1}, Enum.EasingStyle.Back)
+    for _, l in ipairs({title, sub, status}) do tween(l, 0.5, {TextTransparency = 0}) end
+    task.wait(0.9)
+
+    -- loading (cukup lama supaya tulisan terbaca)
+    tween(fill, 2.4, {Size = UDim2.new(1, 0, 1, 0)}, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+    task.wait(1.2)
+    status.Text = "Menyiapkan menu..."
+    task.wait(1.2)
+    status.Text = "Siap!"
+    task.wait(0.8)
+
+    -- menghilang pelan
+    tween(scale, 0.5, {Scale = 1.1})
+    tween(box, 0.5, {BackgroundTransparency = 1})
+    tween(boxStroke, 0.5, {Transparency = 1})
+    tween(track, 0.5, {BackgroundTransparency = 1})
+    tween(fill, 0.5, {BackgroundTransparency = 1})
+    for _, l in ipairs({title, sub, status}) do
+        tween(l, 0.5, {TextTransparency = 1, TextStrokeTransparency = 1})
+    end
+    task.wait(0.55)
+    box:Destroy()
+    if gui.Parent then main.Visible = mainWas end
+end)
